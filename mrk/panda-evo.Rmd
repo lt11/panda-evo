@@ -1,0 +1,1634 @@
+---
+title: 'panda: pangenome annotations data analysis'
+author: "Lorenzo Tattini"
+date: "`r Sys.Date()`"
+### html documents may cause problems on Hulk (knit fails)
+### while pdf documents may casue problems on macOS 
+### (latex fails to compile the tex file of the markdown) 
+output: html_document
+---
+
+## Warning Messages
+
+With impg 0.2.0 it is normal to get a warning message stating:
+
+`thread 'main' panicked at src/main.rs:205:56:`
+
+`Target name not found in index`
+
+This is related to the behaviour of `wfmash` who, given to fasta files A and B, does not align both A vs B and B vs A but instead only aligns A vs B.
+
+## TODO
+
+Retrieve the sequences of each block and save them? Probably this is not a wise thing to do. With the new output format it is easy to do this on the fly.
+
+## Input Files and Formats
+
+The input files are: 1) an alignment (e.g. "../aln/sc-phhd-1.paf"), 2) the annotations of the contigs aligned (e.g. as in "/.../data/nano-assemblies-pansn-2024") named in pansn format but with data in classic format, 3) their unique identifiers (e.g. "../ids/ids-ps.txt") 
+
+The alignment file is in paf format. The delimiter (see https://github.com/pangenome/PanSN-spec) is "#". The annotations are in gff format. The file are named using the "-" separator. E.g. in the alignment we may have in line 1 and column 1: "SGDref#0#chrI". The corresponding annotations file is named "SGDref-0-features.gff" and it reports all the annotations for all the corresponding contigs.
+
+## Quick Run
+
+Before running the markdown remember to:
+
+- check the input data folder of the annotation files (`dir_anno`)
+- make a copy of the input alignment in paf format ("/.../aln/graph-name.paf")
+- make the input ("/.../ids/ids-ps.txt") file with the ids (e.g. "SGDref-0", "AIF-1", "AIF-2") of the strains used to build the graph induced from the alignment
+- choose if mitochondrial features should be used (in case they are attached to the first available haplotype) with `with_mito`
+- choose the correct line according to the version of impg installed
+- check all chunks with `eval = FALSE`
+
+## Analysis
+
+We parse the gff files to avoid weird characters that break both `fread()` and `read.table()`. 
+
+```{bash prepares the gff files}
+## settings -------------------------------------------------------------------
+
+### with mitochondrial sequence in one haplotype?
+with_mito="FALSE"
+
+### the gff files repository
+dir_anno="${HOME}/data/nano-assemblies-pansn-2024/annotations"
+
+## clmnt ----------------------------------------------------------------------
+
+### folders
+dir_base=$(dirname "${PWD}")
+dir_out="${dir_base}/anno/gff"
+if [[ -d "${dir_out}" ]]; then rm -rf "${dir_out}"; fi
+mkdir -p "${dir_out}"
+
+### the vector with the strain-haplotypes ids
+declare -a gff_ids
+file_ids="${dir_base}/ids/ids-ps.txt"
+while IFS="\n" read -r one_line; do
+    gff_ids+=("${one_line}")
+done < "${file_ids}"
+
+for strainhaplo_id in "${gff_ids[@]}"; do
+  path_gff=$(find "${dir_anno}" -name "${strainhaplo_id}*gff")
+  name_gff=$(basename "${path_gff}")
+  strain_id=$(basename "${path_gff}" | cut -f 1 -d "-") # e.g. ADE
+  mito_name="${strain_id}-mt-features.gff"
+  path_mito_gff=$(find "${dir_anno}" -name "${mito_name}")
+  gff_type=$(basename "${path_gff}" | cut -f 2 -d "-") # e.g. 0 or 1
+  if [[ "${with_mito}" == "TRUE" && \
+        -f "${path_mito_gff}" && \
+        "${asse_type}" != "2" ]]; then
+    cat <(grep -v "^#" "${path_gff}") <(grep -v "^#" "${path_mito_gff}") \
+    > "${dir_out}/${name_gff}"
+  else
+    grep -v "^#" "${path_gff}" > "${dir_out}/${name_gff}"
+  fi
+done
+
+```
+
+Here we transform the annotation files in gff format to bed files (without header, otherwise impg crashes). The format of the annotations file for the reference genome are slightly different compared to the phenovar data. So we have to process them separately. Moreover, when we process the phenovar data we can filter out the genes with a systematic name since these names will be brought in by the reference annotations. This reduces the calculations needed from impg and thus results in a smaller impg output.
+
+```{r transforms the gff files to bed files}
+## header ---------------------------------------------------------------------
+
+options(scipen = 999)
+options(stringsAsFactors = F)
+rm(list = ls())
+library(data.table)
+library(this.path)
+library(scriptName)
+
+## settings -------------------------------------------------------------------
+
+### fixed settings
+dirBase <- dirname(this.dir())
+dirAnnoGff <- file.path(dirBase, "anno", "gff")
+dirOut <- file.path(dirBase, "anno", "bed")
+unlink(dirOut, recursive = T)
+dir.create(dirOut, showWarnings = F, recursive = T)
+idRef <- "SGDref"
+hdGff <- c("Chr_id", "Strain_id", "Feat_type", "S_coord",
+           "E_coord", "S_val", "Strand_id", "Frame_id", "Attribute_str")
+vtClassSrt <- c("CDS")
+# vtClassSrt <- c("gene",
+#                 "pseudogene",
+#                 "intron",
+#                 "five_prime_UTR_intron",
+#                 "noncoding_exon",
+#                 "plus_1_translational_frameshift",
+#                 "blocked_reading_frame",
+#                 "external_transcribed_spacer_region",
+#                 "internal_transcribed_spacer_region",
+#                 "ARS",
+#                 "ARS_consensus_sequence",
+#                 "TY1",
+#                 "TY1/TY2_soloLTR",
+#                 "TY1_truncated",
+#                 "TY2",
+#                 "TY3_soloLTR",
+#                 "TY4_soloLTR",
+#                 "TSU4_soloLTR",
+#                 "TY4_truncated",
+#                 "TY5",
+#                 "TY5_soloLTR",
+#                 "LTR_retrotransposon",
+#                 "long_terminal_repeat",
+#                 "W_region",
+#                 "Z1_region",
+#                 "Z2_region",
+#                 "centromere",
+#                 "centromere_DNA_Element_I",
+#                 "centromere_DNA_Element_II",
+#                 "centromere_DNA_Element_III",
+#                 "matrix_attachment_site",
+#                 "X_element",
+#                 "X_element_partial",
+#                 "X_element_combinatorial_repeat",
+#                 "X_region",
+#                 "Y_prime_element",
+#                 "Y_region",
+#                 "recombination_enhancer",
+#                 "silent_mating_type_cassette_array",
+#                 "mating_type_region",
+#                 "tRNA",
+#                 "pseudogenic_transcript",
+#                 "ncRNA",
+#                 "ncRNA_gene",
+#                 "non_transcribed_region",
+#                 "rRNA",
+#                 "rRNA_gene",
+#                 "snRNA",
+#                 "snRNA_gene",
+#                 "snoRNA",
+#                 "snoRNA_gene",
+#                 "intein_encoding_region")
+### just in case there's some redundancy
+vtClassSrt <- unique(vtClassSrt)
+
+## clmnt ----------------------------------------------------------------------
+
+### script name
+myName <- current_filename()
+cat("[", myName, "] ",
+    "Transforming the gff to bed. ",
+    "\n", sep = "")
+
+### read strain-haplotypes ids from file
+pathIds <- list.files(path = file.path(dirBase, "ids"), pattern = "ids-ps.txt",
+                      full.names = T)
+vtStrainHaplo <- as.character(fread(file = pathIds, header = F)[[1]])
+vtRef <- grep(idRef, vtStrainHaplo, value = T)
+### remove the reference
+vtStrainHaplo <- grep(idRef, vtStrainHaplo, value = T, invert = T)
+
+### dev indR <- vtRef[1]
+### loop for reference annotations
+for (indR in vtRef) {
+  ### read the gff
+  pathAnnoGff <- list.files(path = dirAnnoGff, pattern = indR,
+                            full.names = T, recursive = T)
+  dtGff <- fread(file = pathAnnoGff, sep = "\t", header = F, verbose = F)
+  colnames(dtGff) <- hdGff
+  ### id
+  strIdPref <- paste0(sub(pattern = "-", replacement = "#", x = indR), "#")
+  ### convert the start coordinate from 1-based (gff) to 0-based (bed)
+  dtGff[, S_coord := S_coord - 1]
+  ### check start and end coordinates: if start = end impg breaks
+  nBad <- nrow(dtGff[S_coord >= E_coord])
+  if (nBad > 0) {
+    cat("[", myName, "] ",
+        "Found ", nBad,
+        " annotations with the start coordinate larger or equal to",
+        " the end coordinate that will be removed.\n",
+        sep = "")
+    dtGff <- dtGff[S_coord < E_coord]
+  }
+  ### filter features (for CDS)
+  dtGff <- dtGff[Feat_type %in% vtClassSrt, ]
+  ### make the feature id column
+  strFeatId <- sub("^.*Name=([^;]*).*$", "\\1", dtGff$Attribute_str)
+  ### trim trailing redundancy, e.g. _CDS in YAL003W_CDS
+  strFeatIdTrm <- sub("^([^_]*).*$", "\\1", strFeatId)
+  ### if strFeatId = dtGff[, Feat_type] set strFeatId = "MN"
+  indM <- which(dtGff[, Feat_type] == strFeatIdTrm)
+  if (length(indM) != 0) {
+    strFeatIdTrm[indM] <- "MN"
+  }
+  ### paste class and feature id (and the strand)
+  strClassIdStrand <- paste0(dtGff[, Feat_type], ":",
+                             strFeatIdTrm, "#", dtGff[, Strand_id])
+  ### transform the gff into a bed file
+  dtBed <- data.table(Chrom_id = paste0(strIdPref, dtGff[, Chr_id]),
+                      Chrom_start = dtGff[, S_coord],
+                      Chrom_end = dtGff[, E_coord],
+                      Class_feat = strClassIdStrand)
+  ### write the bed file
+  nameOut <- sub(pattern = "-features.gff$", replacement = ".bed",
+                 x = basename(pathAnnoGff))
+  pathOutBed <- file.path(dirOut, nameOut)
+  fwrite(file = pathOutBed, x = dtBed, sep = "\t",
+         quote = F, row.names = F, col.names = F)
+}
+
+### dev
+### indS <- vtStrainHaplo[1]
+### indS <- "AIE-0"
+### loop for phenovar annotations
+for (indS in vtStrainHaplo) {
+  ### read the gff
+  pathAnnoGff <- list.files(path = dirAnnoGff, pattern = indS,
+                            full.names = T, recursive = T)
+  dtGff <- fread(file = pathAnnoGff, sep = "\t", header = F)
+  colnames(dtGff) <- hdGff
+  ### id
+  strIdPref <- paste0(sub(pattern = "-", replacement = "#", x = indS), "#")
+  ### convert the start coordinate from 1-based (gff) to 0-based (bed)
+  dtGff[, S_coord := S_coord - 1]
+  ### check start and end coordinates: impg breaks if start = end
+  nBad <- nrow(dtGff[S_coord >= E_coord])
+  if (nBad > 0) {
+    cat("[", myName, "] ",
+        "Found ", nBad,
+        " annotations with the start coordinate larger or equal to",
+        " the end coordinate that will be removed.\n",
+        sep = "")
+    dtGff <- dtGff[S_coord < E_coord]
+  }
+  
+  ### choose valid genes: those genes that do not have a systematic name
+  ### since systematic genes will be included via the reference
+  dtGffGenes <- dtGff[Feat_type %in% "gene", ]
+  ### make the feature id column
+  strGeneSysName <- sub("^.*Name=([^;]*).*$", "\\1", dtGffGenes$Attribute_str)
+  ### nuclear gene names without systematic names:
+  ### e.g. this is not valid: ID=DBVPG6765_G0000030;Name=YAL067C
+  strValidGenes <- grep(pattern = "^Y[A-P][L,R][0-9]{3}[W,C]",
+                        x = strGeneSysName, value = T, invert = T)
+  
+  ### filter features (for CDS)
+  dtGff <- dtGff[Feat_type %in% vtClassSrt, ]
+  ### make the feature id column
+  strFeatId <- sub("^.*Name=([^;]*).*$", "\\1", dtGff$Attribute_str)
+  ### trim trailing redundancy, e.g. .mRNA.1.CDS.2 in YAL003W.mRNA.1.CDS.2
+  strFeatIdTrm <- sub("^([^.]+)\\..*$", "\\1", strFeatId)
+  ### if strFeatId = dtGff[, Feat_type] set strFeatId = "MN"
+  indM <- which(dtGff[, Feat_type] == strFeatIdTrm)
+  if (length(indM) != 0) {
+    strFeatIdTrm[indM] <- "MN"
+  }
+  ### paste class and feature id (and the strand)
+  strClassIdStrand <- paste0(dtGff[, Feat_type], ":",
+                             strFeatIdTrm, "#", dtGff[, Strand_id])
+  ### transform the gff into a bed file
+  ### and filter out genes with a systematic name
+  dtBed <- data.table(chrom = paste0(strIdPref, dtGff[, Chr_id]),
+                      Chrom_start = dtGff[, S_coord],
+                      Chrom_end = dtGff[, E_coord],
+                      Class_feat = strClassIdStrand,
+                      Name_id = strFeatIdTrm)
+  ### remove invalid genes, e.g. ID=DBVPG6765_G0000030;Name=YAL067C
+  dtBed <- dtBed[Name_id %in% strValidGenes, ]
+  ### remove the the column to filter for valid genes
+  dtBed <- dtBed[, 1:4]
+  ### write the bed file
+  nameOut <- sub(pattern = "-features.gff$", replacement = ".bed",
+                 x = basename(pathAnnoGff))
+  pathOutBed <- file.path(dirOut, nameOut)
+  fwrite(file = pathOutBed, x = dtBed, sep = "\t",
+         quote = F, row.names = F, col.names = F)
+}
+
+```
+
+We invoke impg through a system command to compute the features pangenome. Then we remove the redundancy generated by impg by checking the overlap of the regions computed by impg. To do this, every annotation interval is used to generate a block of homology. Each block of homology is decomposed in sub-blocks which are defined by a feature class. The reduced (i.e. nonredundant) sub-block is then transformed (i.e. formatted) and appended to output.
+
+We write also the generators, i.e. the "class:feature" (e.g. "gene:YGL259W#+") that generated a line in the output "pan-features.txt". A generator may generate multiple lines in "pan-features.txt", e.g. when we analyse genes and pseudogenes a generator may produce a "gene" line and a "pseudogene" line.
+
+```{r computes the pangenome}
+## header ---------------------------------------------------------------------
+
+options(scipen = 999)
+options(stringsAsFactors = F)
+rm(list = ls())
+library(data.table)
+library(this.path)
+library(scriptName)
+library(GenomicRanges)
+library(tictoc)
+
+## function(s) ----------------------------------------------------------------
+
+#' Split and Extract a Specific Sub-Column from a Character Column
+#'
+#' This function splits a character column using a specified delimiter 
+#' and extracts the desired sub-column based on the given index.
+#'
+#' @param x A character vector, typically a column from a data table.
+#' @param n An integer specifying the index of the sub-column 
+#'          to extract after splitting.
+#' @param s A character string representing the delimiter used for splitting.
+#'
+#' @return A character vector containing the extracted sub-column values.
+#'
+#' @examples
+#' # example usage:
+#' vec <- c("A|B|C", "D|E|F", "G|H|I")
+#' # extract the second sub-column
+#' SplitSubCol(vec, 2, "|")  
+#'
+#' @export
+SplitSubCol <- function(x, n, s) {
+  y <- sapply(strsplit(x, split = s, fixed = TRUE), "[[", n)
+  return(y)
+}
+
+## settings -------------------------------------------------------------------
+
+### size threshold: smaller overlaps are removed
+sizeLim <- 25
+### fixed settings
+dirBase <- dirname(this.dir())
+### dev dirBase <- "/Users/Lorenzo/dev/panda"
+dirAnnoBed <- file.path(dirBase, "anno", "bed")
+dirOut <- file.path(dirBase, "png")
+unlink(dirOut, recursive = T)
+dir.create(dirOut, showWarnings = F)
+pathGen <- file.path(dirOut, "generators.txt")
+cat("class:feature#strand", "\n", file = pathGen)
+idRef <- "SGDref"
+hdImpg <- c("Query_id", "Query_start", "Query_end",
+            "Target_id", "Target_start", "Target_end",
+            "Target_clsfeat", "N_score", "Query_alndir", "Target_alndir")
+
+### the path to the paf file
+dirAlnPaf <- file.path(dirBase, "aln")
+pathAlnPaf <- list.files(path = dirAlnPaf, pattern = "paf$",
+                         recursive = T, full.names = T)
+if (length(pathAlnPaf) > 1) {
+  cat("[", myName, "] ",
+      "User error.\n",
+      sep = "")
+  ### stop prints "Error: " by default
+  stop("multiple paf files found.")
+} else if (length(pathAlnPaf) == 0) {
+  cat("[", myName, "] ",
+      "User error.\n",
+      sep = "")
+  ### stop prints "Error: " by default
+  stop("no paf file found.")
+}
+
+## clmnt ----------------------------------------------------------------------
+
+### script name
+myName <- current_filename()
+cat("[", myName, "] ",
+    "Making the pangenome. ",
+    "\n", sep = "")
+
+### read strain-haplotypes ids from file (the order is maintained in the output)
+pathIds <- file.path(dirBase, "ids", "ids-ps.txt")
+vtStrainHaplo <- as.character(fread(file = pathIds, header = F)[[1]])
+vtStrainHaploHash <- gsub(pattern = "-", replacement = "#", x = vtStrainHaplo)
+### initialise the output features table
+nHaplos <- length(vtStrainHaploHash)
+dtPanFeats <- data.table(matrix(character(length = 0), ncol = nHaplos))
+setnames(dtPanFeats, vtStrainHaploHash)
+### dev 
+# vtStrainHaploHash <- c("SGDref#0", "AFI#0", "S288C#0",
+#                        "XXX-h3", "stoca-zo", "DBVPG6765#0")
+
+## impg run -------------------------------------------------------------------
+
+### message
+cat("[", myName, "] ",
+    "Running impg. ",
+    "\n", sep = "")
+### dev indS <- vtStrainHaplo[1] 
+indL <- 1
+lsImpg <- list()
+### for each strain-haplotypes (hyphen-separated)
+for (indS in vtStrainHaplo) {
+  
+  ### pick the strain-haplotypes bed file (query)
+  pathAnnoBed <- list.files(path = dirAnnoBed, pattern = indS, full.names = T)
+  
+  ### run "$ impg -p file.paf -b file.bed"  which is 
+  ### (50x faster than going line-by-line)
+  ### with direct load of the output
+  
+  ### string for bash (impg-0.2.0)
+  strBashImpg <- paste0("impg -I -p ", pathAlnPaf, " -b ", pathAnnoBed)
+  # ### string for bash (impg-0.2.3)
+  # strBashImpg <- paste0("impg query -I -p ", pathAlnPaf, " -b ", pathAnnoBed)
+  
+  strOut <- system(strBashImpg, intern = T)
+  ### make a single-file data-table
+  lsImpgOne <- strsplit(strOut, split = "\t")
+  dtImpgOne <- rbindlist(lapply(lsImpgOne,
+                                function(x) as.data.table(as.list(x))))
+  ### append the single-file data-table to a list
+  lsImpg[[indL]] <- dtImpgOne
+  sizeList <- format(object.size(lsImpg), units = "auto")
+  cat("[", myName, "] ",
+      "Size of impg's list: ", sizeList, " at iteration: ",
+      indL, " out of ", length(vtStrainHaplo), ".",
+      "\n", sep = "")
+  indL <- indL + 1
+}
+cat("[", myName, "] ",
+    "Running impg: done.",
+    "\n", sep = "")
+
+### get the redundant data-table
+dtImpgAll <- rbindlist(lsImpg)
+colnames(dtImpgAll) <- hdImpg
+### add supplementary columns
+dtImpgAll[, c("Query_start", "Query_end") := lapply(.SD, as.numeric),
+          .SDcols = c("Query_start", "Query_end")]
+dtImpgAll[, Target_cls := SplitSubCol(Target_clsfeat, 1, ":")]
+dtImpgAll[, c("Target_start", "Target_end") := lapply(.SD, as.numeric),
+          .SDcols = c("Target_start", "Target_end")]
+dtImpgAll[, Target_len := Target_end - Target_start]
+dtImpgAll[, Query_len := Query_end - Query_start]
+
+## overlap size filter --------------------------------------------------------
+
+### size filter
+dtImpgAllSzFlt <- dtImpgAll[Target_len > sizeLim
+                            & Query_len > sizeLim]
+cat("[", myName, "] ",
+    "Overlap size filter. ",
+    "\n", sep = "")
+nDtImpgAll <- nrow(dtImpgAll)
+nDtImpgAllSzFlt <- nrow(dtImpgAllSzFlt)
+nSmall <- nDtImpgAll - nDtImpgAllSzFlt
+cat("[", myName, "] ",
+    "Removing ", nSmall,
+    " entries out of ", nDtImpgAll, ".",
+    "\n", sep = "")
+
+### garbage collection
+rm(dtImpgAll)
+invisible(gc())
+
+## sorting and formatting -----------------------------------------------------
+
+### sorting ascending or descending is not equivalent since the 
+### overlap is done in two rounds and 
+### is strand-aware (if two features have overlapping 
+### coordinates but one is in the + strand and the other is in 
+### the - strand they do not overlap), thus
+### we sort in increasing (ascending) order to avoid spurious
+### overlaps that may occur when multiple classes are analysed
+### (a spurious overlap will produce a big block that cannot be easily
+### decomposed, except for the different classes);
+### the YFL066C locus (where we have the Y' region TEL06L) is a good
+### example of a spurious overlap
+setorder(dtImpgAllSzFlt, Target_len)
+
+### transfer the strand data from Target_clsfeat to Query_id and Target_id,
+### so that when we calculate the blocks these will be strand-aware
+strStrand <- SplitSubCol(dtImpgAllSzFlt[, Target_clsfeat], 2, "#")
+dtImpgAllSzFlt[, Query_id := paste0(Query_id, "#", strStrand)]
+dtImpgAllSzFlt[, Target_id := paste0(Target_id, "#", strStrand)]
+
+## blocks calculation ---------------------------------------------------------
+
+cat("[", myName, "] ",
+    "Blocks calculation. ",
+    "\n", sep = "")
+nBlocks <- 1
+vtUnq <- unique(dtImpgAllSzFlt[, Target_clsfeat])
+### dev
+# indTarClsFeat <- "Y_prime_element:TEL06L#-"
+# indTarClsFeat <- "gene:YAR014C#-"
+# indTarClsFeat <- "gene:YBL037W#+"
+# indTarClsFeat <- "X_element:TEL01L#-"
+# indTarClsFeat <- "gene:YBR140C#-"
+# indTarClsFeat <- "ARS:ARS102#+"
+# indTarClsFeat <- "gene:YCR012W#+"
+### quello con molti haplo-id doppioni, indSb <- "TY1/TY2_soloLTR"
+# indTarClsFeat <- "TY1:MN#-" 
+# indTarClsFeat <- "gene:YGR296W#+"
+# which(vtUnq == "gene:YGR296W#+")
+# indTarClsFeat <- "gene:S288C_G0022800#+"
+# which(vtUnq == "gene:S288C_G0022800#+")
+# which(vtUnq == "ARS+ARS102#+")
+# which(vtUnq == "X_element+TEL01L#+")
+# indTarClsFeat <- unique(dtImpgAllSzFlt[, Target_clsfeat])[3]
+# indTarClsFeat <- vtUnq[1]
+
+### YAL005C overlaps with YAL004W, we do not want these two genes
+### to generate a single sub-block, so we make the overlap strand-aware
+# indTarClsFeat <- "gene:YAL004W#+"
+# indTarClsFeat <- "gene:YAL005C#-"
+for (indTarClsFeat in vtUnq) {
+  
+  ### dev print(nBlocks)
+  
+  ### get the target class-feature that will generate the block
+  dtTarClsFeat <- dtImpgAllSzFlt[indTarClsFeat, on = "Target_clsfeat"]
+  ### check if the corresponding interval is still in dtImpgAllSzFlt
+  ### (if it was ovelapping with a former indTarClsFeat
+  ### it has already been removed, but dtTarClsFeat will still have a line
+  ### e.g. the following):
+  ### Query_id Query_start Query_end Target_id Target_start Target_end
+  ###   <char>       <num>     <num>    <char>        <num>      <num>
+  ###     <NA>         NA        NA      <NA>           NA         NA
+  ### Target_clsfeat N_score Query_alndir Target_alndir Target_cls Target_len
+  ###         <char>  <char>       <char>        <char>     <char>      <num>
+  ###    buciodeculo    <NA>         <NA>          <NA>       <NA>         NA
+  
+  if (any(is.na(dtTarClsFeat[, Query_id]))) {
+    next
+  }
+  
+  ### first round of overlap (on query coordinates)
+  setkey(dtTarClsFeat, Query_id, Query_start, Query_end)
+  dtIndOverOne <- foverlaps(dtImpgAllSzFlt, dtTarClsFeat,
+                            nomatch = NULL, type = "any", which = T)
+  dtBlock <- dtImpgAllSzFlt[dtIndOverOne[, xid], ]
+  ### dev print(format(object.size(dtBlock), units = "auto"))
+  
+  ### second round of overlap (on target coordinates)
+  setkey(dtBlock, Target_id, Target_start, Target_end)
+  dtIndOverTwo <- foverlaps(dtImpgAllSzFlt, dtBlock, 
+                            nomatch = NULL, type = "any", which = T)
+  dtBlock <- rbindlist(list(dtBlock, dtImpgAllSzFlt[dtIndOverTwo[, xid], ]))
+  ### dev print(format(object.size(dtBlock), units = "auto"))
+  
+  ### block classes
+  allClassesInBlock <- unique(dtBlock[, Target_cls])
+  
+  ### dev
+  # cat(indTarClsFeat, "\t",
+  #     nBlocks, "\t", length(allClassesInBlock), "\n",
+  #     file = "~/Desktop/check-nsb.txt", append = T)
+  
+  ## sub-blocks reduction (class-by-class, strand-aware) ----------------------
+  
+  ### dev
+  # indSb <- "gene"
+  # indSb <- "TY1/TY2_soloLTR"
+  # indSb <- "Y_prime_element"
+  for (indSb in allClassesInBlock) {
+    ### reduce (same as bedtools merge) the rows for each class
+    ### on the basis of the query coordinates
+    grSblock <- GRanges(seqnames = dtBlock[Target_cls == indSb, Query_id],
+                        ranges = IRanges(start = dtBlock[Target_cls == indSb,
+                                                         Query_start],
+                                         end = dtBlock[Target_cls == indSb,
+                                                       Query_end]),
+                        mcols = dtBlock[Target_cls == indSb, Target_clsfeat])
+    grSblockRed <- reduce(grSblock)
+    
+    ### vector with the features names and class name
+    ### cleaned of the "#+" or "#-" at the end of the string
+    ### e.g. "gene:S288C_G0022800" and "gene:YGR296W" 
+    vtClsFeat <- sub(pattern = "#[\\+\\-]$",
+                     replacement = "",
+                     x = unique(grSblock$mcols))
+    ### features string
+    strFeats <- paste(gsub(pattern = paste0(indSb, ":"), replacement = "",
+                           x = vtClsFeat),
+                      collapse = ",")
+    
+    dtSblockRed <- data.table(as.character(grSblockRed@seqnames),
+                              as.character(grSblockRed@ranges))
+    
+    ## transformation of the reduced sub-block --------------------------------
+    
+    ### e.g. this dtSblockRed:
+    ###                 V1              V2
+    ###             <char>          <char>
+    ###  SGDref#0#chrVII#+ 1084864-1090591
+    ###   S288C#0#chrVII#+ 1085116-1090843
+    ###
+    ### becomes a two-column data-table with columns:
+    ###                 SGDref#0                     S288C#0
+    ###                   <char>                      <char>
+    ### chrVII:1084864-1090591#+    chrVII:1085116-1090843#+
+    
+    ### transposition and collapsing explained with
+    ### another example, this dtSblockRed:
+    ###                      V1            V2
+    ###                  <char>        <char>
+    ###     DBVPG6765#0#chrIV#- 960288-966619
+    ###         AFI#0#chrXIII#- 349539-349680
+    ###         AFI#0#chrXIII#- 349713-349989
+    ###   DBVPG6765#0#chrXIII#- 354903-355179
+    ###           AFI#0#chrIV#- 960661-961002
+    ###       S288C#0#chrXIII#- 384508-384784
+    ###      SGDref#0#chrXIII#- 378732-379008
+    ###
+    ### must produce this column:
+    ### DBVPG6765#0
+    ### chrIV:960288-966619;chrXIII:354903-355179
+    
+    ### formatting dtSblockRed
+    dtSblockRed[, Haplo_id := sub("#chr.*", "", dtSblockRed[, V1])]
+    dtSblockRed[, Info_str := paste(SplitSubCol(x = dtSblockRed[, V1],
+                                                n = 3, s = "#"),
+                                    dtSblockRed[, V2],
+                                    sep = ":")]
+    ### collapsing with ";" all the Haplo_id elements of a Haplo_id
+    dtSblockRedCo <- dtSblockRed[, paste(Info_str, collapse = ";"),
+                                 by = Haplo_id]
+    ### transpose, producing a data-table
+    dtTra <- transpose(dtSblockRedCo)
+    ### set column names and format
+    setnames(dtTra, as.character(dtTra[1, ]))
+    dtTra <- dtTra[-1]
+    ### add Class_id and Features_id columns
+    dtTra[, ':='(Class_id = rep(indSb, .N), Features_id = rep(strFeats, .N))]
+    
+    ### add the missing columns: not needed 
+    ### since rbindlist makes it by default using fill = TRUE
+    # newCols <- setdiff(vtStrainHaploHash, colnames(dtTra))
+    # dtTra[, (newCols) := lapply(newCols, function(x) NA)]
+    # setcolorder(dtTra, vtStrainHaploHash)
+    
+    ### append with rbindlist matching (default operation) column names
+    dtPanFeats <- rbindlist(list(dtPanFeats, dtTra), fill = T)
+    
+    ### append the generator feature to the output
+    cat(rep(indTarClsFeat, nrow(dtTra)), sep = "\n",
+        append = T, file = pathGen)
+    ### dev print(nrow(dtTra))
+  }
+  
+  ### delete dtIndOverOne and dtIndOverTwo rows in dtImpgAllSzFlt,
+  ### the (any(is.na(dtTarClsFeat[, Query_id]))) will avoid 
+  ### the loop to break
+  indOut <- unique(c(dtIndOverOne[, xid], dtIndOverTwo[, xid]))
+  dtImpgAllSzFlt <- dtImpgAllSzFlt[-indOut]
+  
+  nBlocks <- nBlocks + 1
+  
+  ### stop prints "Error: " by default
+  ### dev if (nBlocks == 20) stop("we did 20 iterations!")
+}
+cat("[", myName, "] ",
+    "Blocks calculation left ",
+    nrow(dtImpgAllSzFlt),
+    " impg lines. ",
+    "\n", sep = "")
+
+cat("[", myName, "] ",
+    "Blocks calculation: done. ",
+    "\n", sep = "")
+
+### format and write dtPanFeats
+leftCols <- c("Class_id", "Features_id")
+colOrder <- c(leftCols, setdiff(names(dtPanFeats), leftCols))
+setcolorder(dtPanFeats, colOrder)
+pathOutPanFeat <- file.path(dirOut, "pan-features.txt")
+write.table(x = dtPanFeats, file = pathOutPanFeat, append = F, quote = F,
+            sep = "\t", col.names = T, row.names = F, na = "MA")
+save(dtPanFeats, file = file.path(dirOut, "pan-features.RData"))
+
+```
+
+Here, we prepare a multi-fasta file for each sub-block and we calculate the corresponding global statistics.
+
+```{r makes the sub-blocks fasta files}
+## header ---------------------------------------------------------------------
+
+options(scipen = 999)
+options(stringsAsFactors = F)
+rm(list = ls())
+library(data.table)
+library(this.path)
+library(scriptName)
+library(stringr)
+library(Biostrings)
+library(BiocParallel)
+library(gtools)
+
+## function(s) ----------------------------------------------------------------
+
+#' Prepend Column Names to Substrings in Selected Columns of a data.table
+#'
+#' This function modifies a `data.table` by prepending each value 
+#' in the specified columns 
+#' with the corresponding column name followed by `#`. 
+#' Substrings within a column are assumed 
+#' to be separated by semicolons (`;`). `NA` values remain unchanged.
+#'
+#' @param x A `data.table` containing the dataset to be modified.
+#' @param y A numeric vector of column indices specifying 
+#'          which columns should be modified.
+#'
+#' @return The input `data.table` is modified in-place, 
+#' with the selected columns updated 
+#' to have their column names prefixed to each substring.
+#'
+#' @examples
+#' library(data.table)
+#' 
+#' # create example data.table
+#' dt <- data.table(
+#'   ID = 1:3,
+#'   SGD#0 = c("chrIV:30-32", "chrXIV:386-541;chrXIV:260-415", NA),
+#'   AAB#1 = c("", "chrV:35-80", "chrXII:99-111")
+#' )
+#' 
+#' # define columns to modify 
+#' # (assuming SGD#0 is in column 2 and AAB#1 in column 3)
+#' indHapCols <- c(2, 3)
+#'
+#' # apply the function
+#' AddColPref(dt, indHapCols)
+#'
+#' # expected output:
+#' #     ID   SGD#0                                        AAB#1
+#' # 1:  1    SGD#0#chrIV:30-32                            ""  (unchanged)
+#' # 2:  2    SGD#0#chrXIV:386-541;SGD#0chrXIV:260-415     AAB#1#chrV:35-80
+#' # 3:  3    NA (unchanged)                               AAB#1#chrXII:99-111
+#'
+#' @export
+AddColPref <- function(x, y) {
+  x[, (y) := lapply(y, function(indC) {
+    col_name <- names(x)[indC]
+    ifelse(!is.na(x[[indC]]),
+           gsub("([^;]+)", paste0(col_name, "#\\1"), x[[indC]], perl = T),  
+           x[[indC]])})]
+  return(x)
+}
+
+#' Replace NA Values with Empty Strings in a data.table
+#'
+#' This function modifies a data.table replacing all NA values 
+#' with empty strings ("").
+#' You can choose whether to apply this only to character 
+#' columns or to all columns
+#' (which will coerce all types to character).
+#'
+#' @param x A `data.table` object to modify in-place.
+#' @param y Logical. If `TRUE`, replaces NA in all columns 
+#'          (and coerces to character).
+#'          If `FALSE` (default), replaces only NA values
+#'          in character columns.
+#'
+#' @return The modified `data.table` with NA values replaced by "".
+#' @examples
+#' library(data.table)
+#' x <- data.table(A = c("apple", NA), B = c(NA, "orange"), C = c(1, NA))
+#' ReplaceNAtoEmpty(x)         # only character columns
+#' ReplaceNAtoEmpty(x, TRUE)   # all columns, coerced to character
+ReplaceNAtoEmpty <- function(x, y = F) {
+  if (!data.table::is.data.table(x)) {
+    ### stop prints "Error: " by default
+    stop("input must be a data.table.")
+  }
+  colsToMod <- if (y) names(x) else names(x)[sapply(x, is.character)]
+  
+  x[, (colsToMod) := lapply(.SD, function(x) {
+    x[is.na(x)] <- ""
+    x
+  }), .SDcols = colsToMod]
+  
+  return(x)
+}
+
+#' Replace Empty Strings with NA Values in a data.table
+#'
+#' This function modifies a data.table by replacing all empty strings ("")
+#' with NA values. You can choose whether to apply this only to character 
+#' columns or to all columns (which will coerce all types to character).
+#'
+#' @param x A `data.table` object to modify in-place.
+#' @param y Logical. If `TRUE`, replaces "" in all columns 
+#'          (and coerces to character).
+#'          If `FALSE` (default), replaces only "" values
+#'          in character columns.
+#'
+#' @return The modified `data.table` with "" values replaced by NA.
+#' @examples
+#' library(data.table)
+#' x <- data.table(A = c("apple", ""), B = c("", "orange"), C = c("1", ""))
+#' ReplaceEmptyToNA(x)         # only character columns
+#' ReplaceEmptyToNA(x, TRUE)   # all columns, coerced to character
+ReplaceEmptyToNA <- function(x, y = F) {
+  if (!data.table::is.data.table(x)) {
+    ### stop prints "Error: " by default
+    stop("input must be a data.table.")
+  }
+  colsToMod <- if (y) names(x) else names(x)[sapply(x, is.character)]
+  
+  x[, (colsToMod) := lapply(.SD, function(col) {
+    col[col == ""] <- NA
+    col
+  }), .SDcols = colsToMod]
+  
+  return(x)
+}
+
+#' Read Multiple gzipped CDS FASTA Files into a data.table
+#'
+#' `ReadCds` reads all gzipped CDS FASTA files 
+#' corresponding to the provided sample IDs,
+#' extracting sequence names and sequences into a data.table fast lookup table.
+#'
+#' @param dir Character. Directory containing gzipped CDS FASTA files.
+#' @param ids Character vector of sample identifiers 
+#'            (e.g., "CMF#1", "SGDref#0").
+#'
+#' @return A data.table with columns: Source_id, Seq_id, 
+#'         Sequence (single string).
+#'         Keys: Source_id, Seq_id.
+#' }
+#'
+#' @export
+ReadCds <- function(dir, ids) {
+  normIds <- gsub("#", "-", ids, fixed = T)
+  dtAll <- data.table()
+  
+  for (genId in normIds) {
+    oneFasta <- file.path(dir, paste0(genId, "-cds.fa.gz"))
+    
+    if (!file.exists(oneFasta)) {
+      warning(sprintf("Missing: %s", oneFasta))
+      next
+    }
+    
+    ### wrap connection inside a local() block
+    ### to ensure that it is closed once we have finished 
+    ### working with that specific file (best practices)
+    dtThis <- local({
+      con <- gzfile(oneFasta, "r")
+      on.exit(close(con))
+      
+      idSeq <- NULL
+      seqLines <- character()
+      records <- list()
+      
+      ### read one line at a time till EOF is found
+      while (length(line <- readLines(con, n = 1, warn = F)) > 0) {
+        if (startsWith(line, ">")) {
+          if (!is.null(idSeq)) {
+            records[[length(records) + 1]] <- list(
+              Source_id = gsub("-", "#", genId, fixed = T),
+              Seq_id = idSeq,
+              Sequence = paste(seqLines, collapse = "")
+            )
+          }
+          idSeq <- sub("^>", "", strsplit(line, "\\s+")[[1]][1])
+          seqLines <- character()
+        } else {
+          seqLines <- c(seqLines, line)
+        }
+      }
+      
+      ### add the last entry of a fasta
+      if (!is.null(idSeq)) {
+        records[[length(records) + 1]] <- list(
+          Source_id = gsub("-", "#", genId, fixed = T),
+          Seq_id = idSeq,
+          Sequence = paste(seqLines, collapse = "")
+        )
+      }
+      ### append to dtThis
+      rbindlist(records)
+    })
+    dtAll <- rbind(dtAll, dtThis)
+  }
+  return(dtAll)
+}
+
+#' Check if a DNA sequence is a valid protein-coding sequence
+#'
+#' This function verifies whether a given DNA sequence satisfies basic criteria
+#' for being a valid open reading frame (ORF) in protein-coding genes.
+#'
+#' @param seq A character string representing a DNA sequence 
+#'            (composed of A, T, G, and C).
+#'
+#' @return `TRUE` if the sequence:
+#' \itemize{
+#'   \item Has a length that is a multiple of 3 (i.e., full codons),
+#'   \item Starts with a start codon (`ATG`),
+#'   \item Ends with a stop codon (`TAA`, `TAG`, or `TGA`),
+#'   \item Contains no internal stop codons (i.e., stop codons appear only 
+#'         at the end).
+#' }
+#' Otherwise, it returns `FALSE`.
+#'
+#' @examples
+#' IsValidCoding("ATGGACGACTAA")  # TRUE
+#' IsValidCoding("ATGTAGGACTAA")  # FALSE due to internal stop codon
+#'
+#' @export
+IsValidCoding <- function(seq) {
+  strStartCod <- c("ATG")
+  strStopCods <- c("TAA", "TAG", "TGA")
+  if (nchar(seq) %% 3 != 0) return(F)
+  codons <- str_sub(seq, seq(1, nchar(seq), 3), seq(3, nchar(seq), 3))
+  if (!(codons[1] %in% strStartCod)) return(F)
+  if (!(codons[length(codons)] %in% strStopCods)) return(F)
+  if (any(codons[-length(codons)] %in% strStopCods)) return(F)
+  return(T)
+}
+
+#' Reverse complement of a DNA sequence
+#'
+#' This function computes the reverse complement of a DNA string 
+#' using the four standard bases.
+#'
+#' @param seq A character string representing a DNA sequence (e.g. "ATGC").
+#' @param alphabet A named character vector defining the complement mapping.
+#'                 Names are input bases, values are their complements.
+#'                 Default is \code{c(A="T", T="A", G="C", C="G")}.
+#'
+#' @return A character string containing the reverse complement of \code{seq}.
+#'         Or `NULL` if the input string is not valid.
+#'
+#' @examples
+#' RevComp("CACCA")
+#' # "TGGTG"
+#'
+#' RevComp("AATTGGCC")
+#' # "GGCCAATT"
+#'
+#' # This will retutn NULL:
+#' # RevComp("ATGN")
+#'
+#' @export
+RevComp <- function(seq) {
+  if (grepl("[^ATGC]", seq)) {
+    message("Skipping invalid sequence.", "\n",
+            seq, "\n")
+    return(NULL)
+  }
+  alphabet = c(A="T", T="A", G="C", C="G")
+  chars <- strsplit(seq, split = "")[[1]]
+  comp <- alphabet[chars]
+  rc <- paste(rev(comp), collapse = "")
+  return(rc)
+}
+
+#' Append valid coding sequences to a FASTA file
+#'
+#' `AppendValidFa()` takes a set of sequences and their headers, checks whether
+#' each sequence represents a valid coding sequence (using `IsValidCoding`),
+#' and appends only the valid ones to a FASTA file. If a sequence is not valid
+#' in the forward orientation, its reverse complement is checked instead.
+#'
+#' @param h A character vector of sequence headers (FASTA identifiers).
+#'          Must be the same length as `s`. Must NOT contain the header
+#'          starting character ">" (this is handled by Biostrings).
+#' @param s A character vector of nucleotide sequences.
+#' @param p A character string of length 1 giving the path to the output 
+#'          FASTA file. The file is created if it does not exist, 
+#'          otherwise valid sequences are appended.
+#'
+#' @details
+#' This function requires the **Biostrings** package. It uses 
+#' [Biostrings::DNAStringSet()], [Biostrings::reverseComplement()], and 
+#' [Biostrings::writeXStringSet()] internally, but does not attach the package 
+#' to the search path (via `library()`).
+#'
+#' The function checks validity of each sequence using `IsValidCoding`. Because
+#' `IsValidCoding` is not vectorized, it is wrapped in a `vapply()` call for
+#' safety. For sequences not valid in the forward orientation, their reverse
+#' complement is tested. Only sequences that are valid in at least one 
+#' orientation are written to the FASTA file. 
+#'
+#' Headers are supplied via `h` and written as standard FASTA identifiers 
+#' (prefixed with ">" by Biostrings automatically).
+#'
+#' @return Invisibly returns the number of sequences written to the file.
+#'         Returns `0L` (invisibly) if no sequence was valid.
+#'
+#' @examples
+#' \dontrun{
+#' headers <- c("seq1", "seq2", "seq3")
+#' seqs <- c("ATGAAATGA", "TTTT", "ATGGGGGTAA")
+#' out_file <- tempfile(fileext = ".fa")
+#' AppendValidFa(headers, seqs, out_file)
+#' }
+#'
+#' @seealso [Biostrings::DNAStringSet()], [Biostrings::writeXStringSet()],
+#'          [IsValidCoding()]
+#'
+#' @importFrom Biostrings DNAStringSet reverseComplement writeXStringSet
+#' @export
+AppendValidFa <- function(h, s, p) {
+  ### check for required package
+  if (!requireNamespace("Biostrings", quietly = TRUE)) {
+    ### stop prints "Error: " by default
+    stop("package 'Biostrings' is required but not installed.")
+  }
+  
+  ### check the output path is valid
+  stopifnot(is.character(p), length(p) == 1L)
+  
+  if (!length(h)) return(invisible(0L))
+  dssSeqs <- DNAStringSet(s)
+  dssSeqsRc <- reverseComplement(dssSeqs)
+  
+  ### since IsValidCoding isn't vectorized we wrap it with vapply
+  VcIsValidCoding <- function(x) vapply(x, IsValidCoding, logical(1))
+  
+  ### a named boolean with the sequence (name) and if it is valid
+  nbooVaFw <- VcIsValidCoding(as.character(dssSeqs))
+  ### initialise valid reverse-complement as FALSE
+  nbooVaRc <- logical(length(dssSeqs))
+  ### sequences that need to be the reverse-complement
+  booNeedRc <- !nbooVaFw
+  if (any(booNeedRc)) {
+    nbooVaRc[booNeedRc] <- VcIsValidCoding(as.character(dssSeqsRc[booNeedRc]))
+  }
+  ### check if there is anything valid
+  booKeep <- nbooVaFw | nbooVaRc
+  if (!any(booKeep)) return(invisible(0L))
+  
+  ### choose forward by default, then replace where RC is needed
+  out <- dssSeqs[booKeep]
+  booUseRc <- !nbooVaFw[booKeep]
+  out[booUseRc] <- dssSeqsRc[booKeep][booUseRc]
+  ### header is formatted by writeXStringSet (it adds the ">")
+  names(out) <- h[booKeep]
+  
+  writeXStringSet(out,
+                  filepath = p,
+                  format = "fasta",
+                  append = T)
+  
+  return(invisible(length(out)))
+}
+
+#' Find Non-Low Outliers Based on Sequence Length (with Threshold)
+#'
+#' `FindNonLowOutliers()` identifies the indexes of sequences 
+#' whose lengths are not considered
+#' lower outliers, based on the interquartile range (IQR) method.
+#'
+#' This function removes `NA` values from the input, computes the length
+#' of each valid sequence, and returns both the indexes of sequences whose
+#' lengths are greater than or equal to the computed lower bound and the value
+#' of that bound.
+#'
+#' @param seq A character vector of nucleotide or amino acid sequences.
+#'            May contain `NA` values.
+#'
+#' @return A list with the following components:
+#' \describe{
+#'   \item{indexes}{Integer vector of indexes of non-lower-outlier sequences, 
+#'   relative to the original input vector.}
+#'   \item{limit}{The numeric value of the lower bound 
+#'   used to define outliers.}
+#' }
+#'
+#' @examples
+#' seqs <- c("ATTATATGTGATGAGC", "ATGCGTATGATCCATGAATGCGT", "AT", NA)
+#' res <- FindNonLowOutliers(seqs)
+#' res$indexes  # non-outlier indices
+#' res$limit    # lower bound used
+#'
+#' @export
+FindNonLowOutliers <- function(seq) {
+  ### remove NAs, if any
+  booValid <- !is.na(seq)
+  seq <- seq[booValid]
+  
+  ### get sequence lengths
+  lens <- nchar(seq)
+  
+  ### IQR-based lower bound
+  q1 <- quantile(lens, 0.25)
+  q3 <- quantile(lens, 0.75)
+  iqr <- q3 - q1
+  limit <- q1 - 1.5 * iqr
+  
+  ### return results as a list
+  indBon <- which(lens >= limit)
+  return(list(indexes = indBon, limit = limit))
+}
+
+#' Extract a genomic segment from a named genome object
+#'
+#' @description
+#' Parses a coordinate string of the form `"chr:start-end"` and returns the
+#' corresponding subsequence from a genome object.
+#'
+#' @details
+#' This function expects `genome` to be a `DNAStringSet` object 
+#' named by seqnames. Internally it:
+#' 1) parses `coord` with a strict regex,
+#' 2) subtracts 1 from the parsed start,
+#' 3) calls [Biostrings::subseq()].
+#'
+#' **Coordinate convention note**: this implementation **adds 1**
+#' to the parsed start position to convert the
+#' “**BED-like 0-based**” input to “**GFF-like 1-based**”.
+#'
+#' @param coord A character scalar like `"chrVII:435624-435679"`.
+#' @param genome A genome container with elements accessible 
+#'               via `genome[[chr]]`, a named `DNAStringSet` (Biostrings).
+#'
+#' @return A `DNAString` (the extracted segment) or `NULL` if parsing fails,
+#'   the chromosome is not found, or inputs are malformed.
+#'
+#' @section Dependencies:
+#' - **Biostrings**: [Biostrings::subseq()] is used to slice sequences.
+#'
+#' @importFrom Biostrings subseq
+#'
+#' @examples
+#' # genome <- Biostrings::DNAStringSet(c(chrI = "ACTG..."))
+#' # ExtractExon("chrI:10-20", genome)
+#'
+#' @export
+ExtractSequence <- function(coord, genome) {
+  m <- regexec("^([^:]+):([0-9]+)-([0-9]+)$", coord)
+  parts <- regmatches(coord, m)[[1]]
+  if (length(parts) != 4) return(NULL)
+  chr <- parts[2]
+  start <- as.integer(parts[3]) + 1
+  end <- as.integer(parts[4])
+  seq <- genome[[chr]]
+  if (is.null(seq)) return(NULL)
+  bingo <- subseq(seq, start, end)
+  return(bingo)
+}
+
+#' Build and validate coding sequences from one element (set of exons)
+#'
+#' @description
+#' Given a semicolon-separated list of exon coordinates (e.g.,
+#' `"chr:start-end;chr:start-end;..."`) and a genome identifier,
+#' this function extracts each exon, concatenates them in **all permutations**
+#' (each exon used at most once), evaluates validity on both strands using
+#' `IsValidCoding()`, and returns the **longest valid** sequence (if any).
+#' Imports:
+#'   Biostrings,
+#'   gtools
+#'
+#' @details
+#' Steps:
+#' 1) Split `coordinates` into exon strings 
+#'    and extract each with [ExtractSequence()].
+#' 2) Generate all permutations of exons (no repeats).
+#' 3) Concatenate with [Biostrings::xscat()] to a candidate CDS.
+#' 4) Evaluate forward (`+`) and reverse-complement (`-`) via `IsValidCoding()`
+#'    and `RevComp()`.
+#' 5) Return the longest valid sequence 
+#'    and metadata (strand, exon order, length, coordinates).
+#'
+#' **Coordinate convention note**: `ExtractSequence()` adds 1 
+#' to the parsed start, to convert from 0-based coordinates 
+#' to 1-based coordinates.
+#'
+#' @param coordinates A character scalar with exon coordinates separated by `;`.
+#' @param id Genome identifier used to select `genomes[[id]]`.
+#' @param genomes A list-like container of genome objects; `genomes[[id]]` must
+#'   yield a genome accessible by chromosome names (see [ExtractSequence()]).
+#'
+#' @return A named list with fields:
+#' \itemize{
+#'   \item `strand` (`"+"` or `"-"`)
+#'   \item `ord` (comma-separated exon permutation)
+#'   \item `seq` (the selected coding sequence as a character)
+#'   \item `len` (sequence length, integer)
+#'   \item `coo` (coordinates of the regions, character)
+#' }
+#' or `NULL` if no valid sequence is found or inputs are invalid.
+#'
+#' @section Dependencies:
+#' - **Biostrings**: [Biostrings::xscat()] 
+#'   to concatenate exons (XString objects).
+#' - **gtools**: [gtools::permutations()] 
+#'   to enumerate exon orders.
+#' - **Custom**: `IsValidCoding()` and `RevComp()` 
+#'  must be defined in scope.
+#'
+#' @importFrom Biostrings xscat
+#' @importFrom gtools permutations
+#'
+#' @seealso [ExtractSequence()], `IsValidCoding()`, `RevComp()`
+#'
+#' @examples
+#' # genomes <- list(SGDref = Biostrings::DNAStringSet(...))
+#' # ProcessElement("chrI:10-20;chrI:30-50", "SGDref", genomes)
+#'
+#' @export
+ProcessElement <- function(coordinates, id, genomes) {
+  genome <- genomes[[id]]
+  if (is.null(genome)) return(NULL)
+  
+  c <- unlist(strsplit(coordinates, ";", fixed = TRUE))
+  nEx <- length(c)
+  if (nEx > 3) return(NULL)
+  
+  exons <- lapply(c, ExtractSequence, genome = genome)
+  if (any(sapply(exons, is.null))) return(NULL)
+  
+  ### assumption: any exon is picked only once
+  mtPerms <- permutations(nEx, nEx, repeats.allowed = FALSE)
+  
+  lsValSeqs <- list()
+  
+  for (i in seq_len(nrow(mtPerms))) {
+    ### pick one row of the matrix with all the permutations
+    permExons <- exons[mtPerms[i, ]]
+    cds <- do.call(xscat, permExons)
+    cdsFw <- as.character(cds)
+    cdsRc <- RevComp(cdsFw)
+    
+    ### forward strand
+    if (!is.null(cdsFw) && IsValidCoding(cdsFw)) {
+      lsValSeqs[[length(lsValSeqs) + 1]] <- list(
+        strand = "+",
+        ord = paste(mtPerms[i, ], collapse = ","),
+        seq = cdsFw,
+        len = nchar(cdsFw),
+        coo = coordinates
+      )
+    }
+    ### reverse strand
+    if (!is.null(cdsRc) && IsValidCoding(cdsRc)) {
+      lsValSeqs[[length(lsValSeqs) + 1]] <- list(
+        strand = "-",
+        ord = paste(mtPerms[i, ], collapse = ","),
+        seq = cdsRc,
+        len = nchar(cdsRc),
+        coo = coordinates
+      )
+    }
+  }
+  
+  # pick the longest valid sequence
+  if (length(lsValSeqs) == 0) return(NULL)
+  best <- lsValSeqs[[which.max(sapply(lsValSeqs, `[[`, "len"))]]
+  return(best)
+}
+
+#' Process one table row across multiple genomes/columns
+#'
+#' @description
+#' For a given input row (e.g., from a `data.table`), evaluate each coordinate
+#' column with [ProcessElement()], collecting the best valid CDS (if any) per
+#' genome/column.
+#'
+#' @details
+#' - `row` must provide `"Features_id"` and the requested coordinate columns.
+#' - Each `coords` string is passed to [ProcessElement()] with `id = col`.
+#' - Results are returned as a list of small lists ready to be rbind-ed / bound
+#'   into a data.table/data.frame.
+#'
+#' **Coordinate convention note**: the same **internal 1→0 index conversion**
+#' applies via [ExtractExon()] (start is decremented by 1 before slicing).
+#'
+#' @param row A single-row list-like object supporting `[[` access 
+#'            by column name (e.g., a `data.table` row obtained via `dt[i]`).
+#' @param cols Character vector of column names that contain coordinate strings.
+#' @param genomes A list-like container of genome objects; 
+#'                see [ProcessElement()].
+#'
+#' @return A list of results; each element is a list with fields:
+#'   `Feature_id`, `Genome_id`, `Strand_str`, `Exon_order`, `Seq_str`, 
+#'   `Seq_length`.
+#'   Returns an empty list if nothing valid is found.
+#'
+#' @section Dependencies:
+#' - Relies on [ProcessElement()], which in turn uses 
+#'   **Biostrings** and **gtools**,
+#'   and requires `IsValidCoding()` and `RevComp()` to be defined.
+#'
+#' @seealso [ProcessElement()], [ExtractExon()]
+#'
+#' @examples
+#' # res <- ProcessRow(dt[1], cols = c("SGDref#0","DBVPG6765#0"), 
+#' #                   genomes = genomes)
+#'
+#' @export
+ProcessRow <- function(row, cols, genomes) {
+  id <- row[["Features_id"]]
+  lsResults <- list()
+  
+  for (col in cols) {
+    coords <- row[[col]]
+    res <- ProcessElement(coords, col, genomes)
+    if (is.null(res)) next
+    lsResults[[length(lsResults) + 1]] <- list(
+      Feature_id = id,
+      Genome_id = col,
+      Strand_str = res$strand,
+      Exon_order = res$ord,
+      Seq_str = res$seq,
+      Seq_length = res$len,
+      Coords_id = res$coo
+    )
+  }
+  lsResults
+}
+
+#' Append sequences from list to a FASTA file (Biostrings-backed)
+#'
+#' This function appends a sequence to a FASTA file, including its 
+#' header. The latter is built to be unique. The forward and the reverse 
+#' strands are translated ("+" to "W", "-" to "C") to improve readability.
+#' 
+#' @param lst A list of elements each with `Genome_id`, 
+#'            `Exon_order`, `Strand_str`, `Coords_id`, `Seq_str.`
+#' @param outfile The path to FASTA file (created if missing).
+#' @param width The wrap width (default 80).
+#' @return invisibly, number of sequences written
+AppendListToFasta <- function(lst, outfile, width = 80L) {
+  stopifnot(is.list(lst), is.character(outfile), length(outfile) == 1L)
+  if (!requireNamespace("Biostrings", quietly = T)) {
+    stop("Biostrings is required.")
+  }
+  
+  ### keep only well-formed elements
+  need <- c("Genome_id", "Exon_order", "Strand_str", "Coords_id", "Seq_str")
+  ok <- vapply(lst, function(el) all(need %in% names(el)), logical(1))
+  if (!all(ok)) warning("Skipping ", sum(!ok), " malformed element(s).")
+  lst <- lst[ok]
+  if (!length(lst)) return(invisible(0L))
+  
+  headers <- vapply(lst, function(el) {
+    strWC <- switch(el$Strand_str,
+                    "+" = "W",
+                    "-" = "C",
+                    el$Strand_str)
+    paste0(el$Genome_id, "-",
+           el$Exon_order, "-",
+           strWC, "-",
+           el$Coords_id)
+  }, character(1))
+  
+  seqs <- vapply(lst, function(el) el$Seq_str, character(1))
+  
+  dss <- Biostrings::DNAStringSet(seqs)
+  names(dss) <- headers
+  
+  Biostrings::writeXStringSet(dss, filepath = outfile,
+                              append = file.exists(outfile),
+                              width = width)
+  invisible(length(dss))
+}
+
+## settings -------------------------------------------------------------------
+
+### reference genome
+idRefHap <- "SGDref-0"
+### pattern of systematic genes
+ptnSys <- "Y[A-P][L,R][0-9]{3}[W,C](-[A-Z])?"
+### pattern of random id genes
+ptnRid <- "_G[0-9]{7}"
+### the type of sub-blocks to process
+strSblock <- "cds"
+### minimal frequency of a gene to be labelled as core
+freqCore <- 0.95
+### if at least minPointsOutliers are found in the CDS fasta files 
+### FindNonLowOutliers is used to calculate the minimum size to accept a CDS; 
+### otherwise minCdsSize is used 
+### (it is a number slightly lower than the shortest CDS known)
+minPointsOutliers <- 30
+minCdsSize <- 69
+
+### counters
+countN <- 1          # number of sub-blocks with one or more missing sequence
+countSeqMissing <- 1 # number of missing sequences
+countSeqFound <- 1   # number of valid sequences found in the genome fasta 
+
+### fixed settings
+dirBase <- dirname(this.dir())
+
+### columns to skip when we make the fasta files
+skippedCols <- c("Class_id", "Features_id", "Ν_pres", "F_pres", "N_feats",
+                 "N_feats_sys", "N_feats_rid", "Sblock_type",
+                 "N_total", "N_invalid", "F_pres_genome")
+
+### input data
+pathEsse <- file.path(Sys.getenv("HOME"), "data",
+                      "SGD-essential-genes", "essentiality.txt")
+pathInPan <- file.path(dirBase, "png", "pan-features.RData")
+dirCds <- file.path(Sys.getenv("HOME"), "data",
+                    "nano-assemblies-pansn-2024", "cds")
+dirGen <- file.path(Sys.getenv("HOME"), "data",
+                    "nano-assemblies-pansn-2024", "genomes")
+### output data
+dirOut <- file.path(dirBase, "seqs", strSblock)
+unlink(dirOut, recursive = T)
+dir.create(dirOut, recursive = T)
+
+## clmnt ----------------------------------------------------------------------
+
+### script name
+myName <- current_filename()
+cat("[", myName, "] ",
+    "Making the CDS files. ",
+    "\n", sep = "")
+
+### load the pangenome (dtPanFeats)
+load(pathInPan)
+### dev dtPanFeats <- dtPanFeats[1:20, 1:10, with = F]
+
+### get the columns corresponding to genomes
+bonCols <- setdiff(names(dtPanFeats), skippedCols)
+
+### we need the first and last haplotype columns to correctly subset 
+### the data-table when we calculate the statistics 
+nHaplos <- ncol(dtPanFeats) - 2
+indHapCols <- 3:ncol(dtPanFeats)
+
+### load essential non-evolvable (esne) genes
+dtEsse <- fread(pathEsse, sep = "\t", col.names = c("Gene_id", "Gene_type"))
+### get the list of non-evolvable genes
+vtEsne <- dtEsse[Gene_type == "non-evolvable", unique(Gene_id)]
+
+### find all the CDS fasta files and their paths
+pathAllCds <- list.files(dirCds, pattern = "cds.fa.gz", full.names = T)
+
+### find all the genomes fasta files and their paths
+pathGenomes <- list.files(path = dirGen, pattern = "-genome\\.fa\\.gz$",
+                          recursive = T, full.names = T)
+fileNames <- basename(pathGenomes)
+patternGen <- paste0("^(", paste(sub("#" ,"-", bonCols), collapse = "|"), ")")
+booMatches <- grepl(patternGen, fileNames)
+matchedFiles <- pathGenomes[booMatches]
+matchedFilesNames <- sub("-", "#",
+                         sub("-genome.fa.gz", "", basename(matchedFiles)))
+
+## collapse haplotypes into genomes -------------------------------------------
+
+### keep dtPanFeats with e.g. chrIV:12-234 instead of S288C#0#chrIV:12-234
+dtTmp <- copy(dtPanFeats)
+AddColPref(dtTmp, indHapCols)
+ReplaceNAtoEmpty(dtTmp)
+### remove numeric suffix
+vtGnmIds <- gsub("#[0-9]+$", "", names(dtTmp)[indHapCols])
+### change column names and identify unique ids
+names(dtTmp)[indHapCols] <- vtGnmIds
+vtGnmIdsUniq <- unique(vtGnmIds)
+
+### initialize the data.table with CDS presence based on genome
+dtPanFeatsPresGnm <- dtTmp[, .(Class_id, Features_id)]
+
+### process each unique prefix
+for (indP in vtGnmIdsUniq) {
+  vtColMatched <- which(names(dtTmp) == indP)
+  
+  if (length(vtColMatched) > 1) {
+    colsBon <- dtTmp[, ..vtColMatched]
+    dtPanFeatsPresGnm[, (indP) := do.call(paste, c(colsBon, sep = ";"))]
+    dtPanFeatsPresGnm[, (indP) := gsub("^;|;$", "", get(indP))]
+  } else if (length(vtColMatched) == 1) {
+    dtPanFeatsPresGnm[, (indP) := dtTmp[[vtColMatched]]]
+  }
+}
+ReplaceEmptyToNA(dtPanFeatsPresGnm)
+
+### garbage collection
+rm(dtTmp)
+invisible(gc())
+
+## presence (genome-based) ----------------------------------------------------
+
+nGenomes <- ncol(dtPanFeatsPresGnm) - 2
+indGnmCols <- 3:ncol(dtPanFeatsPresGnm)
+
+### number of genomes with at least one region in the sub-block
+dtPanFeatsPresGnm[, Ν_pres := rowSums(!is.na(as.matrix(.SD))),
+                  .SDcols = indGnmCols]
+### fraction of genomes with at least one region in the sub-block
+dtPanFeatsPresGnm[, F_pres := c(Ν_pres / nGenomes) ]
+
+### add F_pres in dtPanFeats
+### by matching dtPanFeats[, "Features_id"]
+### and dtPanFeatsPresGnm[, "Features_id"]
+dtPanFeats[dtPanFeatsPresGnm,
+           F_pres_genome := i.F_pres,
+           on = .(Features_id = Features_id)]
+rm(dtPanFeatsPresGnm)
+
+## block annotation as non-evolvable, core, or dispensable --------------------
+
+dtPanFeats[, Sblock_type := fifelse(
+  grepl(paste(vtEsne, collapse = "|"), Features_id),
+  "non-evolvable",
+  fifelse(F_pres_genome > freqCore, "core", "dispensable")
+)]
+
+## read the genomes -----------------------------------------------------------
+
+### a list of named genomes of class DNAStringSet,
+### e.g. lsDssGenomes[["SGDref#0"]] gives the DNAStringSet
+### with the SGDref#0 genome
+lsDssGenomes <- setNames(lapply(matchedFiles, readDNAStringSet),
+                         matchedFilesNames)
+
+## read all the CDS files and build their table with the sequences ------------
+
+### TODO: faster with readDNAStringSet (and requires less memory)
+dtAllCds <- ReadCds(dirCds, bonCols)
+
+## make fasta files (one per row) ---------------------------------------------
+
+### dev indR <- 1002
+for (indR in 1:nrow(dtPanFeats)) {
+  ## find a meaningful unique id for the output file --------------------------
+  
+  ### get the first systematic name, if any
+  strSysId <- regmatches(dtPanFeats[indR, Features_id],
+                         regexpr(ptnSys, dtPanFeats[indR, Features_id]))
+  if (length(strSysId) == 0) {
+    ### get the first random name
+    strSysId <- strsplit(dtPanFeats[indR, Features_id],
+                         split = ",", fixed = T)[[1]][1]
+  }
+  pathFaOut <- file.path(dirOut,
+                         paste0(indR, "-", strSysId,
+                                "-", dtPanFeats[indR, Sblock_type], ".fa"))
+  ### clean the output file if it already exists
+  if (file.exists(pathFaOut)) {
+    unlink(pathFaOut)
+  }
+  
+  ## grab sequences from the CDS database -------------------------------------
+  
+  ### proteins of unknown function (e.g. YER189W)
+  ### may be missing in the CDS fasta of SGDref
+  ### even if they are reported in the gff
+  
+  ### we make a perl regexp with lookbehind and lookahead;
+  ### e.g. S288C_G0016460,YER190W,YER189W is grepped with
+  ### S288C_G0016460|YER190W|YER189W
+  ### to avoid to get e.g. YEL075C/YER189W from YER189W;
+  ### do not confuse the "|" in the patter (which acts as an OR)
+  ### with "|" in x (dtAllCds[["Seq_id"]]) 
+  ### which is just the default string separator in the input fasta files
+  strPatterns <- paste0("(?<=^|\\|)(",
+                        gsub(",", "|", dtPanFeats[indR, Features_id]),
+                        ")$")
+  ### Seq_id is e.g. SGDref_G0000040|SGDref_G0000040.mRNA.1|YAL067C
+  indHit <- grep(strPatterns, dtAllCds[["Seq_id"]], value = F, perl = T)
+  if (length(indHit) > 0) {
+    strHds  <- paste0(dtAllCds[["Source_id"]][indHit],
+                      " ",
+                      dtAllCds[["Seq_id"]][indHit])
+    strSeqs <- dtAllCds[["Sequence"]][indHit]
+    ### filter out small sequences (e.g. wrong annotations like 
+    ### CMF_HP1_G0006560|CMF_HP1_G0006560.mRNA.1|CMF_HP1_G0006560
+    ### since otherwise it will end up with YNL233W)
+    booEnoughCdsFasta <- length(indHit) > minPointsOutliers
+    if (booEnoughCdsFasta) {
+      lsNonLowOut <- FindNonLowOutliers(strSeqs)
+      indLenVal <- lsNonLowOut[[1]]
+      minLength <- lsNonLowOut[[2]]
+      AppendValidFa(gsub(" ", "-", strHds[indLenVal]),
+                    strSeqs[indLenVal],
+                    pathFaOut)
+    } else {
+      minLength <- minCdsSize
+      indLenVal <- which(nchar(strSeqs) > minLength)
+      AppendValidFa(gsub(" ", "-", strHds[indLenVal]),
+                    strSeqs[indLenVal],
+                    pathFaOut)
+    }
+    
+    doneCols <- sub("^([^ ]+).*", "\\1", strHds[indLenVal])
+    naCols <- colnames(dtPanFeats)[is.na(dtPanFeats[indR, ])]
+    caccaCols <- c(doneCols,
+                   naCols,
+                   skippedCols)
+    ### columns of strains with regions reported in the pangenome data-table
+    ### that can get a CDS from the genome fasta
+    missCols <- setdiff(colnames(dtPanFeats), caccaCols)
+    lsSeqsFound <- ProcessRow(dtPanFeats[indR, ], missCols, lsDssGenomes)
+    if (booEnoughCdsFasta) {
+      booBon <- vapply(lsSeqsFound,
+                       function(lsElem)
+                         lsElem$Seq_length > minLength,
+                       logical(1))
+      nSeqFound <- AppendListToFasta(lsSeqsFound[booBon], pathFaOut)
+    } else {
+      booBon <- vapply(lsSeqsFound,
+                       function(lsElem)
+                         lsElem$Seq_length > minCdsSize,
+                       logical(1))
+      nSeqFound <- AppendListToFasta(lsSeqsFound[booBon], pathFaOut)
+    }
+    ### as.integer() converts F to 0 and T to 1
+    countN <- countN + as.integer(length(missCols) > 0)
+    countSeqMissing <- countSeqMissing + length(missCols)
+    countSeqFound <- countSeqFound + nSeqFound
+  }
+}
+### here "missing" means that we found homology on the graph but 
+### in the annotations the cds fasta is missing
+### (thus we do not count the cases where no homology was detected 
+### since these elements are NA)
+cat("Number of sub-blocks with one (or more) missing or too short CDS: ",
+    countN, "\n",
+    "Number of missing or too short CDS fasta: ",
+    countSeqMissing ,"\n",
+    "Number of CDS built from their genome: ",
+    countSeqFound, "\n",
+    sep = "")
+
+```
