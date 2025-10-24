@@ -321,7 +321,7 @@ RevComp <- function(seq) {
 #' @export
 AppendValidFa <- function(h, s, p) {
   ### check for required package
-  if (!requireNamespace("Biostrings", quietly = TRUE)) {
+  if (!requireNamespace("Biostrings", quietly = T)) {
     ### stop prints "Error: " by default
     stop("package 'Biostrings' is required but not installed.")
   }
@@ -523,7 +523,7 @@ ProcessElement <- function(coordinates, id, genomes) {
   genome <- genomes[[id]]
   if (is.null(genome)) return(NULL)
   
-  c <- unlist(strsplit(coordinates, ";", fixed = TRUE))
+  c <- unlist(strsplit(coordinates, ";", fixed = T))
   nEx <- length(c)
   if (nEx > 3) return(NULL)
   
@@ -531,7 +531,7 @@ ProcessElement <- function(coordinates, id, genomes) {
   if (any(sapply(exons, is.null))) return(NULL)
   
   ### assumption: any exon is picked only once
-  mtPerms <- permutations(nEx, nEx, repeats.allowed = FALSE)
+  mtPerms <- permutations(nEx, nEx, repeats.allowed = F)
   
   lsValSeqs <- list()
   
@@ -564,7 +564,7 @@ ProcessElement <- function(coordinates, id, genomes) {
     }
   }
   
-  # pick the longest valid sequence
+  ### pick the longest valid sequence
   if (length(lsValSeqs) == 0) return(NULL)
   best <- lsValSeqs[[which.max(sapply(lsValSeqs, `[[`, "len"))]]
   return(best)
