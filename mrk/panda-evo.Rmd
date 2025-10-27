@@ -1466,7 +1466,7 @@ vtGnmIds <- gsub("#[0-9]+$", "", names(dtTmp)[indHapCols])
 names(dtTmp)[indHapCols] <- vtGnmIds
 vtGnmIdsUniq <- unique(vtGnmIds)
 
-### initialize the data.table with CDS presence based on genome
+### initialize the data-table with CDS presence based on genome
 dtPanFeatsPresGnm <- dtTmp[, .(Class_id, Features_id)]
 
 ### process each unique prefix
