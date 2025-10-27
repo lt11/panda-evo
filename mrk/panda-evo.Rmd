@@ -8,6 +8,39 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
+## Overview
+
+The panda-evo is a bash/R code that performs the pangenome annotation data analysis. It takes as input:
+	- a PAF aliagnment from PGGB
+	- a set of annotations and the corresponding genomes from the ScRAP collection
+	- a list of "essential non-evolvable" genes
+
+It performs the following steps:
+- the CDS annotations in the GFF files of the ScRAP collection are converted to BED format
+- the CDS pangenome table is computed
+	- impg is invoked through a system command producing overlap-pairs that consist of a query and a target region
+	- overlap-pair regions shorter than 25 bp are filtered out
+	- overlap-pair regions are sorted in ascending order
+	- the strand ID of query and target regions of each overlap-pair are transferred to the query and target IDs
+	- homology blocks are calculated via foverlaps() by processing each overlap-pair present in impg output
+		- for each overlap-pair, its overlap with other overlap-pairs is evaluated using query as well as target regions, defining a homology block
+		- if multiple features were included in the input BED files, each homology block is decomposed in sub-blocks made of only one class of features (e.g. CDS, transposone)
+		- sub-blocks are reduced (similarly to bedtools reduce) on the basis of the query coordinates
+		- the reduced sub-block are transformed into the final output lines which contains the IDs of the features within the sub-block and the corresponding regions
+		- the feature that generated the sub-block is appended to output
+		- the sub-block is appended to output
+		- the processed overlap-pair lines are removed
+- the multi-fasta file for each sub-block is computed and annotated as "essential non-evolvable", "core", "dispensable"
+	- all the CDS sequences available in the ScRAP collection are retrieved from the corresponding ScRAP file
+		- if more than 30 sequences are retrieved, sequences classified as low outliers in size are filtered out
+		- if 30 or less sequences are retrieved, those shorted than 69 bp are removed
+	- the genomic sequences all the regions missing CDS sequences in the ScRAP collection are extracted from the corresponding fasta files and appended to the corresponding output file if they are valid elements (considering elements with maximum 3 exons) in any of the two strands
+		- each element (i.e. the set of regions of a strain in a sub-block) is considered valid if any permutation (without repetitions) of the regions of the element:
+			- starts with a start codon
+			- ends with an end codon
+			- has a number of codons that is multiple of 3
+		- if multiple valid permutations are found only the largest is retained
+
 ## Warning Messages
 
 With impg 0.2.0 it is normal to get a warning message stating:
@@ -24,7 +57,7 @@ Retrieve the sequences of each block and save them? Probably this is not a wise 
 
 ## Input Files and Formats
 
-The input files are: 1) an alignment (e.g. "../aln/sc-phhd-1.paf"), 2) the annotations of the contigs aligned (e.g. as in "/.../data/nano-assemblies-pansn-2024") named in pansn format but with data in classic format, 3) their unique identifiers (e.g. "../ids/ids-ps.txt") 
+The input files are: 1) an alignment (e.g. "../aln/sc-phhd-1.paf"), 2) the annotations of the contigs aligned (e.g. as in "/.../data/nano-assemblies-pansn-2024") named in pansn format but with data in classic format, 3) their unique identifiers (e.g. "../ids/ids-ps.txt"), 4) a list of essential non-evolvable genes.
 
 The alignment file is in paf format. The delimiter (see https://github.com/pangenome/PanSN-spec) is "#". The annotations are in gff format. The file are named using the "-" separator. E.g. in the alignment we may have in line 1 and column 1: "SGDref#0#chrI". The corresponding annotations file is named "SGDref-0-features.gff" and it reports all the annotations for all the corresponding contigs.
 
