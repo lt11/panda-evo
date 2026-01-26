@@ -30,7 +30,7 @@ It performs the following steps:
 		- the feature that generated the sub-block is appended to output
 		- the sub-block is appended to output
 		- the processed overlap-pair lines are removed
-- the multi-fasta file for each sub-block is computed and annotated as "essential non-evolvable", "core", "dispensable"
+- the multi-fasta file for each sub-block is computed and annotated as "essential non-evolvable", "core", "accessory"
 	- all the CDS sequences available in the ScRAP collection are retrieved from the corresponding ScRAP file
 		- if more than 30 sequences are retrieved, sequences classified as low outliers in size are filtered out
 		- if 30 or less sequences are retrieved, those shorted than 69 bp are removed
@@ -1539,12 +1539,12 @@ dtPanFeats[dtPanFeatsPresGnm,
            on = .(Features_id = Features_id)]
 rm(dtPanFeatsPresGnm)
 
-## block annotation as non-evolvable, core, or dispensable --------------------
+## block annotation as non-evolvable, core, or accessory --------------------
 
 dtPanFeats[, Sblock_type := fifelse(
   grepl(paste(vtEsne, collapse = "|"), Features_id),
   "non-evolvable",
-  fifelse(F_pres_genome > freqCore, "core", "dispensable")
+  fifelse(F_pres_genome > freqCore, "core", "accessory")
 )]
 
 ## read the genomes -----------------------------------------------------------
