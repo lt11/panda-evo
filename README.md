@@ -45,7 +45,7 @@ Rscript -e 'install.packages(c(
 - Generation of datasets tailored for evolutionary analyses
 - Integration with the panda pipeline ecosystem
 
-## Repository Layout
+## Repository layout
 
 Top-level directories:
 
@@ -96,7 +96,7 @@ The pipeline runs in four main stages.
 
 This last stage is the main purpose of `panda-evo`: to derive a curated collection of valid coding sequences from pangenome-defined CDS blocks for downstream comparative and evolutionary analyses.
 
-## Sequence Classes
+## Sequence classes
 
 Each CDS block is labelled in `mrk/c4.R` as one of:
 
@@ -136,7 +136,7 @@ As in `panda`, the `impg` command may need to be adjusted to match the installed
 
 Check `mrk/c3.R` or the matching chunk in `mrk/panda-evo.Rmd` before running the workflow.
 
-## Running an Analysis
+## Running an analysis
 
 There is no executable or standalone CLI entrypoint; the repository is driven from the notebook or by running a single chunk, as described below.
 
@@ -172,7 +172,7 @@ Rscript mrk/run-profvis.R c3.R
 
 Run that command from `mrk/` if you want `run-profvis.R` to resolve the target script as written.
 
-## Main Outputs
+## Main outputs
 
 Primary CDS pangenome outputs are written to `png/`:
 
