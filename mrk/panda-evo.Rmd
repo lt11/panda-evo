@@ -1539,7 +1539,7 @@ dtPanFeats[dtPanFeatsPresGnm,
            on = .(Features_id = Features_id)]
 rm(dtPanFeatsPresGnm)
 
-## block annotation as non-evolvable, core, or accessory --------------------
+## block annotation as non-evolvable, core, or accessory ----------------------
 
 dtPanFeats[, Sblock_type := fifelse(
   grepl(paste(vtEsne, collapse = "|"), Features_id),
